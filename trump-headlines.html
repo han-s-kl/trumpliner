@@ -658,8 +658,7 @@ function renderApprovalChart(dataPoints) {
   canvas.style.display = 'block';
 }
 
-async function fetchApproval() {
-  // Auto-detect latest Datawrapper version by searching downward from a high number
+async function fetchApprovalDatawrapper() {
   const chartId = 'z8nax';
   const startVersion = 150;
   const minVersion = 104;
@@ -677,7 +676,6 @@ async function fetchApproval() {
 
       if (dateIdx === -1 || overallIdx === -1) continue;
 
-      // Parse all data points for the chart
       const dataPoints = [];
       for (let i = 1; i < lines.length; i++) {
         const cols = lines[i].split(',');
@@ -690,30 +688,98 @@ async function fetchApproval() {
 
       if (dataPoints.length === 0) continue;
 
-      // Latest values
       const last = dataPoints[dataPoints.length - 1];
-      const approve = (50 + last.value / 2).toFixed(1);
-      const disapprove = (50 - last.value / 2).toFixed(1);
+      const lastDate = new Date(last.date);
+      const daysSinceUpdate = (Date.now() - lastDate) / (1000 * 60 * 60 * 24);
 
-      document.getElementById('approveValue').textContent = `${approve}%`;
-      document.getElementById('disapproveValue').textContent = `${disapprove}%`;
-      document.getElementById('approvalTrend').textContent =
-        `Netto: ${last.value > 0 ? '+' : ''}${last.value.toFixed(1)}`;
-      document.getElementById('approvalSource').textContent =
-        `Bron: Silver Bulletin — ${last.date}`;
-      document.getElementById('dashboard').style.display = 'grid';
+      if (daysSinceUpdate > 7) return null;
 
-      // Render the trend chart
-      requestAnimationFrame(() => renderApprovalChart(dataPoints));
-      return;
+      return {
+        approve: (50 + last.value / 2).toFixed(1),
+        disapprove: (50 - last.value / 2).toFixed(1),
+        net: last.value.toFixed(1),
+        date: last.date,
+        source: 'Silver Bulletin',
+        dataPoints,
+      };
     } catch {}
   }
+  return null;
+}
 
-  // Fallback
-  document.getElementById('approveValue').textContent = '—';
-  document.getElementById('disapproveValue').textContent = '—';
-  document.getElementById('approvalSource').textContent = 'Peilingen niet beschikbaar';
+async function fetchApprovalWikipedia() {
+  const url = 'https://en.wikipedia.org/w/api.php?action=parse&page=Opinion_polling_on_the_second_Trump_presidency&prop=wikitext&section=1&format=json&origin=*';
+  try {
+    const resp = await fetchWithTimeout(url, 10000);
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const wikitext = json.parse?.wikitext?.['*'] || '';
+
+    const rows = wikitext.split('|-');
+    let totalApprove = 0, totalDisapprove = 0, count = 0;
+    let latestDate = '';
+
+    for (const row of rows) {
+      const pctMatches = row.match(/(\d+\.\d+)%/g);
+      if (!pctMatches || pctMatches.length < 2) continue;
+
+      const dateMatch = row.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}/);
+      if (!dateMatch) continue;
+
+      const approve = parseFloat(pctMatches[0]);
+      const disapprove = parseFloat(pctMatches[1]);
+      if (approve > 0 && approve < 100 && disapprove > 0 && disapprove < 100) {
+        totalApprove += approve;
+        totalDisapprove += disapprove;
+        count++;
+        if (!latestDate || new Date(dateMatch[0]) > new Date(latestDate)) {
+          latestDate = dateMatch[0];
+        }
+      }
+    }
+
+    if (count === 0) return null;
+
+    const avgApprove = (totalApprove / count).toFixed(1);
+    const avgDisapprove = (totalDisapprove / count).toFixed(1);
+    const net = (parseFloat(avgApprove) - parseFloat(avgDisapprove)).toFixed(1);
+
+    return {
+      approve: avgApprove,
+      disapprove: avgDisapprove,
+      net,
+      date: latestDate,
+      source: 'Polling gemiddelde',
+      dataPoints: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchApproval() {
+  let result = await fetchApprovalDatawrapper();
+  if (!result) result = await fetchApprovalWikipedia();
+
+  if (!result) {
+    document.getElementById('approveValue').textContent = '—';
+    document.getElementById('disapproveValue').textContent = '—';
+    document.getElementById('approvalSource').textContent = 'Peilingen niet beschikbaar';
+    document.getElementById('dashboard').style.display = 'grid';
+    return;
+  }
+
+  document.getElementById('approveValue').textContent = `${result.approve}%`;
+  document.getElementById('disapproveValue').textContent = `${result.disapprove}%`;
+  document.getElementById('approvalTrend').textContent =
+    `Netto: ${parseFloat(result.net) > 0 ? '+' : ''}${result.net}`;
+  document.getElementById('approvalSource').textContent =
+    `Bron: ${result.source} — ${result.date}`;
   document.getElementById('dashboard').style.display = 'grid';
+
+  if (result.dataPoints) {
+    requestAnimationFrame(() => renderApprovalChart(result.dataPoints));
+  }
 }
 
 // Translation via Google Translate free endpoint
